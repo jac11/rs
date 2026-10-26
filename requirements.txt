@@ -1,0 +1,6 @@
+websocket-client
+pyinstaller
+pyautogui
+Pillow
+opencv-python
+numpy
