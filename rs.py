@@ -148,7 +148,17 @@ def do_download(ws, path):
         })
     except Exception as e:
         send(ws, {"t": "reply", "data": f"[-] Download failed: {e}\n"})
-
+def fingerprint():
+    return {
+        "os": sys.platform,
+        "platform": "win32" if sys.platform == "win32" else sys.platform,
+        "hostname": socket.gethostname(),
+        "user": os.getenv("USER") or os.getenv("USERNAME") or "?",
+        "cwd": os.getcwd(),
+        "hardware_id": HARDWARE_ID,
+        "device_id": HARDWARE_ID,
+        "ext": False # This tells the UI it's not the JS extension
+    }
 def main():
     while True:
         try:
